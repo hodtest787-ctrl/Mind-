@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flash Memory Check Game</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #4f46e5; /* Indigo-600 */
+            --primary-hover: #4338ca; /* Indigo-700 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937; /* Gray-800 */
+            color: #f3f4f6; /* Gray-100 */
+        }
+        .container-card {
+            background-color: #374151; /* Gray-700 */
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+        }
+        .btn-primary {
+            background-color: var(--primary);
+            transition: background-color 0.2s;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background-color: var(--primary-hover);
+        }
+        .word-grid {
+            /* Kept minmax at 120px to ensure good spacing */
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); 
+            gap: 1rem;
+        }
+        .word-item {
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            background-color: #4b5563; /* Gray-600 */
+            text-align: center;
+            /* REDUCED FONT SIZE to prevent long words from breaking onto two lines */
+            font-size: 1rem; 
+            font-weight: 600;
+            user-select: none;
+            word-break: break-all;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="min-h-screen flex items-center justify-center p-4">
+        <div class="container-card w-full max-w-xl p-8 rounded-xl">
+            <h1 class="text-3xl font-extrabold text-center mb-6 text-white">Flash Memory Challenge</h1>
+            
+            <!-- Dynamic Content Area -->
+            <div id="content-area">
+                <!-- Content will be injected here by JavaScript -->
+            </div>
+
+            <!-- Global Message/Loading Indicator -->
+            <div id="message" class="mt-4 text-center text-lg font-medium text-yellow-400 hidden"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- GEMINI API KEY IMPLEMENTATION ---
+        // Your provided API key is added here. 
+        // This key will be used for all calls to the Gemini API outside of this specific Canvas environment.
+        const apiKey = "AIzaSyCYcPoOrdCkd4dOoMaOsLEd_xijuCOYLs0"; 
+        const model = 'gemini-2.5-flash-preview-05-20';
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+        // --- Game Constants ---
+        const TIME_EASY = 30;
+        const TIME_MEDIUM = 15;
+        const TIME_DIFFICULT = 7;
+        const LEVELS = {
+            'EASY': TIME_EASY,
+            'MEDIUM': TIME_MEDIUM,
+            'DIFFICULT': TIME_DIFFICULT
+        };
+        const AD_DELAY_SECONDS = 5;
+
+        // --- Game State ---
+        let gameState = {
+            phase: 'home', // 'home', 'ad_delay', 'loading', 'memorize', 'recall', 'results'
+            words: [],
+            timeLimit: TIME_EASY, // Default to Easy
+            currentDifficulty: 'EASY',
+            timer: TIME_EASY,
+            intervalId: null,
+            startTime: null,
+        };
+
+        // --- DOM Elements ---
+        const contentArea = document.getElementById('content-area');
+        const messageEl = document.getElementById('message');
+
+        // --- Utility Functions ---
+
+        /**
+         * Generic fetch wrapper with exponential backoff for API robustness.
+         */
+        async function fetchWithBackoff(payload, maxRetries = 3, delay = 1000) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        return await response.json();
+                    } else if (response.status === 429 && i < maxRetries - 1) {
+                        // Rate limit exceeded, retry
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2; // Exponential backoff
+                    } else {
+                        throw new Error(`API request failed with status: ${response.statusText}`);
+                    }
+                } catch (error) {
+                    if (i === maxRetries - 1) {
+                        throw new Error(`Failed to fetch from API after ${maxRetries} attempts: ${error.message}`);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    delay *= 2;
+                }
+            }
+        }
+
+        /**
+         * Sets the global game message and ensures the loading indicator is visible/hidden.
+         */
+        function setMessage(text, isVisible = true) {
+            messageEl.textContent = text;
+            messageEl.classList.toggle('hidden', !isVisible);
+        }
+
+        /**
+         * Gets a difficulty-specific prompt for the Gemini API.
+         */
+        function getWordPrompt(difficulty) {
+            switch (difficulty) {
+                case 'EASY':
+                    return "Generate 10 common, simple, easy-to-remember words (e.g., single-syllable, common objects/actions) for a memory game.";
+                case 'MEDIUM':
+                    return "Generate 10 distinct, medium-length, common but less obvious words for a memory game.";
+                case 'DIFFICULT':
+                    return "Generate 10 distinct, longer, or less common, challenging words for a memory game.";
+                default:
+                    return "Generate 10 distinct, single English words for a memory game.";
+            }
+        }
+
+        // --- Game Logic ---
+
+        /**
+         * Sets the difficulty and immediately starts the game (ad is now on retry).
+         */
+        function selectDifficulty(level) {
+            gameState.currentDifficulty = level;
+            gameState.timeLimit = LEVELS[level];
+            // Initial play skips the ad
+            generateWords();
+        }
+        
+        /**
+         * Resets the game state and redirects to the ad screen before starting a retry.
+         * This function is called by the "Try Again" button in the results phase.
+         */
+        function triggerRetryAd() {
+            // Clear any existing timer/interval
+            if (gameState.intervalId) {
+                clearInterval(gameState.intervalId);
+            }
+            // Ensure the state is correctly set for the ad delay, keeping the current difficulty
+            gameState.timeLimit = LEVELS[gameState.currentDifficulty];
+            showAdScreen();
+        }
+
+        /**
+         * Proceeds to generate words only after the ad delay is complete.
+         */
+        function proceedAfterAd() {
+            // Check if the button is enabled (timer is complete)
+            const adButtonEl = document.getElementById('ad-button');
+            if (adButtonEl && !adButtonEl.disabled) {
+                // Clear any existing message and start word generation
+                setMessage("", false);
+                generateWords();
+            } else {
+                setMessage("Please wait for the ad timer to finish.", true);
+            }
+        }
+
+        // --- Ad Phase Management ---
+
+        function showAdScreen() {
+            gameState.phase = 'ad_delay';
+            render();
+
+            let adTimer = AD_DELAY_SECONDS;
+            const adTimerEl = document.getElementById('ad-timer');
+            const adButtonEl = document.getElementById('ad-button');
+            
+            // Initial state check
+            if (adButtonEl) adButtonEl.disabled = true;
+
+            const adInterval = setInterval(() => {
+                adTimer--;
+                if (adTimerEl) adTimerEl.textContent = adTimer;
+
+                if (adTimer <= 0) {
+                    clearInterval(adInterval);
+                    setMessage("Ad complete. Click 'Start Game Now!' to proceed.", true);
+                    if (adButtonEl) {
+                        adButtonEl.textContent = "Start Game Now!";
+                        adButtonEl.disabled = false;
+                        // Add primary styling to indicate it's now clickable
+                        adButtonEl.classList.remove('opacity-50', 'cursor-not-allowed');
+                        adButtonEl.classList.add('btn-primary');
+                        adButtonEl.style.backgroundColor = ''; // Remove inline style
+                    }
+                }
+            }, 1000);
+
+            // Store the interval ID to be cleared if the user resets the game during the ad
+            gameState.intervalId = adInterval;
+        }
+
+        // --- Memorize Phase Logic (Timer, etc.) ---
+
+        function updateTimerDisplay() {
+            const timerEl = document.getElementById('timer-display');
+            if (timerEl) {
+                timerEl.textContent = `Time Remaining: ${gameState.timer}s`;
+                if (gameState.timer <= 10) {
+                    timerEl.classList.add('text-red-400');
+                } else {
+                    timerEl.classList.remove('text-red-400');
+                }
+            }
+        }
+
+        function startTimer() {
+            gameState.timer = gameState.timeLimit;
+            gameState.startTime = Date.now();
+            updateTimerDisplay();
+
+            gameState.intervalId = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - gameState.startTime) / 1000);
+                gameState.timer = gameState.timeLimit - elapsed;
+                
+                if (gameState.timer <= 0) {
+                    clearInterval(gameState.intervalId);
+                    gameState.timer = 0;
+                    startRecallPhase();
+                    return;
+                }
+                updateTimerDisplay();
+            }, 1000);
+        }
+
+        // --- Core Game Phases (Word Generation, Recall, Results) ---
+
+        async function generateWords() {
+            gameState.phase = 'loading';
+            render();
+            setMessage(`Generating 10 unique words for ${gameState.currentDifficulty} level...`, true);
+
+            const systemPrompt = "You are a word generation bot. Your only task is to generate exactly 10 common, distinct, unrelated English words (nouns or verbs). Do not include any numbers, lists, or introductory/explanatory text.";
+            const userQuery = getWordPrompt(gameState.currentDifficulty);
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            words: {
+                                type: "ARRAY",
+                                description: "An array containing exactly 10 distinct, single English words.",
+                                items: { type: "STRING" }
+                            }
+                        },
+                        required: ["words"]
+                    }
+                }
+            };
+
+            try {
+                // Now using the API key defined above
+                const result = await fetchWithBackoff(payload); 
+                const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (jsonText) {
+                    const parsedJson = JSON.parse(jsonText);
+                    const words = parsedJson.words || [];
+                    if (words.length === 10) {
+                        gameState.words = words.map(w => w.toUpperCase()); // Standardize case
+                        startMemoryPhase();
+                    } else {
+                        throw new Error(`API returned ${words.length} words, expected 10.`);
+                    }
+                } else {
+                    throw new Error("Failed to extract content from API response.");
+                }
+
+            } catch (error) {
+                setMessage(`Error: ${error.message}. Please try again.`, true);
+                console.error("Gemini API Error:", error);
+                gameState.phase = 'home';
+                render();
+            }
+        }
+
+        function startMemoryPhase() {
+            setMessage(`Time to memorize! You have ${gameState.timeLimit} seconds.`, true);
+            gameState.phase = 'memorize';
+            render();
+            startTimer();
+        }
+
+        function startRecallPhase() {
+            clearInterval(gameState.intervalId);
+            setMessage("Time is up! Now type the words you remember, one per line.", true);
+            gameState.phase = 'recall';
+            render();
+        }
+
+        function checkResults() {
+            const recallInput = document.getElementById('recall-input');
+            if (!recallInput) return;
+
+            const userWords = recallInput.value
+                .toUpperCase()
+                .split('\n')
+                .map(word => word.trim())
+                .filter(word => word.length > 0);
+
+            const correctWords = gameState.words;
+            let score = 0;
+            const resultsMap = new Map();
+
+            correctWords.forEach(word => resultsMap.set(word, 'missed'));
+
+            userWords.forEach(userWord => {
+                if (correctWords.includes(userWord)) {
+                    if (resultsMap.get(userWord) !== 'correct') {
+                        score++;
+                        resultsMap.set(userWord, 'correct');
+                    }
+                } else {
+                    if (!resultsMap.has(userWord)) {
+                         resultsMap.set(userWord, 'incorrect');
+                    }
+                }
+            });
+
+            gameState.score = score;
+            gameState.userWords = userWords;
+            gameState.resultsMap = Array.from(resultsMap, ([word, status]) => ({ word, status }));
+            gameState.phase = 'results';
+            render();
+            setMessage(`You scored ${score} out of 10!`, true);
+        }
+
+        /**
+         * Full reset to home screen to allow user to change difficulty.
+         */
+        function resetGame() {
+            if (gameState.intervalId) {
+                clearInterval(gameState.intervalId);
+            }
+            gameState = {
+                phase: 'home',
+                words: [],
+                timeLimit: TIME_EASY,
+                currentDifficulty: 'EASY',
+                timer: TIME_EASY,
+                intervalId: null,
+                startTime: null,
+            };
+            setMessage("", false);
+            render();
+        }
+
+        // --- Rendering ---
+
+        function render() {
+            contentArea.innerHTML = '';
+            let html = '';
+
+            switch (gameState.phase) {
+                case 'home':
+                    html = `
+                        <div class="text-center">
+                            <h2 class="text-2xl font-bold mb-4 text-white">Select Difficulty</h2>
+                            <p class="mb-6 text-gray-300">Choose a level to set your memorization time and word complexity.</p>
+                            <div class="space-y-4 sm:space-y-0 sm:flex sm:gap-4 justify-center">
+                                <button onclick="selectDifficulty('EASY')" class="btn-primary w-full sm:w-1/3 px-4 py-3 rounded-lg font-bold text-white shadow-lg transform transition duration-150 hover:scale-[1.02]">
+                                    Easy (30s)
+                                </button>
+                                <button onclick="selectDifficulty('MEDIUM')" class="btn-primary w-full sm:w-1/3 px-4 py-3 rounded-lg font-bold text-white shadow-lg transform transition duration-150 hover:scale-[1.02]">
+                                    Medium (15s)
+                                </button>
+                                <button onclick="selectDifficulty('DIFFICULT')" class="btn-primary w-full sm:w-1/3 px-4 py-3 rounded-lg font-bold text-white shadow-lg transform transition duration-150 hover:scale-[1.02]">
+                                    Difficult (7s)
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    break;
+                
+                case 'ad_delay':
+                    html = `
+                        <div class="text-center p-6 border-4 border-yellow-500 rounded-xl bg-gray-800">
+                            <h2 class="text-2xl font-bold mb-4 text-yellow-400">Sponsored Content</h2>
+                            <!-- Updated container to force 9:16-like vertical ratio -->
+                            <div class="bg-gray-900 border-2 border-gray-600 mb-6 rounded-lg overflow-hidden flex justify-center items-center h-96 w-full max-w-xs mx-auto">
+                                <!-- Ad Image Source (Replaced internal 'uploaded:' path with a public placeholder for external hosting) -->
+                                <img src="https://imgur.com/a/9dJdSfS" 
+                                     alt="Sponsored Ad" 
+                                     class="h-full w-full object-contain"
+                                >
+                            </div>
+                            <p class="mb-4 text-lg text-red-400 font-semibold">
+                                Game starts in: <span id="ad-timer" class="text-2xl font-extrabold">${AD_DELAY_SECONDS}</span>s
+                            </p>
+                            <button id="ad-button" onclick="proceedAfterAd()" 
+                                class="w-full px-8 py-3 rounded-lg font-bold text-white shadow-lg opacity-50 cursor-not-allowed transition duration-300"
+                                style="background-color: #9ca3af;" disabled>
+                                Please wait...
+                            </button>
+                        </div>
+                    `;
+                    break;
+
+                case 'loading':
+                    html = `
+                        <div class="flex flex-col items-center justify-center h-48">
+                            <div class="animate-spin rounded-full h-12 w-12 border-b-4 border-primary"></div>
+                            <p class="mt-4 text-gray-300">Requesting words from the AI...</p>
+                        </div>
+                    `;
+                    break;
+
+                case 'memorize':
+                    html = `
+                        <div class="text-center mb-4">
+                            <h2 id="timer-display" class="text-2xl font-bold mb-4">Time Remaining: ${gameState.timer}s</h2>
+                            <p class="text-sm text-gray-400 font-semibold">Difficulty: ${gameState.currentDifficulty} (${getWordPrompt(gameState.currentDifficulty).split('words').shift()})</p>
+                        </div>
+                        <div class="word-grid p-4 rounded-lg border-2 border-primary">
+                            ${gameState.words.map(word => `<div class="word-item break-words">${word}</div>`).join('')}
+                        </div>
+                        <p class="text-sm text-center mt-4 text-gray-400">Keep those words locked in!</p>
+                    `;
+                    break;
+
+                case 'recall':
+                    html = `
+                        <div class="mb-4">
+                            <h2 class="text-2xl font-bold mb-2 text-center">Recall Phase</h2>
+                            <p class="text-gray-300 text-center mb-4">Type the words you remember, one word per line.</p>
+                            <textarea id="recall-input" 
+                                class="w-full h-48 p-4 rounded-lg bg-gray-800 border-2 border-gray-600 focus:border-primary focus:outline-none text-white text-lg resize-none" 
+                                placeholder="e.g.&#10;APPLE&#10;JUMP&#10;..."></textarea>
+                        </div>
+                        <button onclick="checkResults()" class="btn-primary w-full px-8 py-3 rounded-lg font-bold text-white shadow-lg">
+                            Check My Score
+                        </button>
+                    `;
+                    break;
+
+                case 'results':
+                    const score = gameState.score;
+                    html = `
+                        <h2 class="text-2xl font-bold mb-4 text-center">Results: ${score} / 10</h2>
+                        <p class="text-sm text-center mb-6 text-gray-400 font-semibold">Difficulty: ${gameState.currentDifficulty}</p>
+                        <div class="space-y-4">
+                            ${gameState.resultsMap.map(item => {
+                                let colorClass, icon;
+                                if (item.status === 'correct') {
+                                    colorClass = 'bg-green-600/20 text-green-400';
+                                    icon = '✅';
+                                } else if (item.status === 'missed') {
+                                    colorClass = 'bg-red-600/20 text-red-400';
+                                    icon = '❌';
+                                } else { // 'incorrect' - typed a word not in the list
+                                    colorClass = 'bg-yellow-600/20 text-yellow-400 line-through';
+                                    icon = '⚠️';
+                                }
+                                return `
+                                    <div class="flex items-center justify-between p-3 rounded-lg ${colorClass} font-semibold">
+                                        <span>${icon} ${item.word}</span>
+                                        <span class="text-xs italic">${item.status.toUpperCase()}</span>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        <!-- RETRY FLOW: Try Again triggers the ad. -->
+                        <button onclick="triggerRetryAd()" class="btn-primary w-full mt-8 px-8 py-3 rounded-lg font-bold text-white shadow-lg">
+                            Try Again (Same Difficulty: ${gameState.currentDifficulty})
+                        </button>
+                    `;
+                    break;
+            }
+
+            contentArea.innerHTML = html;
+        }
+
+        // --- Initialization ---
+        window.onload = function() {
+            render();
+        };
+
+        // Expose functions globally for HTML event handlers
+        window.selectDifficulty = selectDifficulty;
+        window.proceedAfterAd = proceedAfterAd; 
+        window.checkResults = checkResults;
+        window.resetGame = resetGame;
+        window.getWordPrompt = getWordPrompt;
+        window.triggerRetryAd = triggerRetryAd; 
+    </script>
+</body>
+</html>
