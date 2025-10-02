@@ -214,7 +214,7 @@
 
                 if (adTimer <= 0) {
                     clearInterval(adInterval);
-                    setMessage("Ad complete. Click 'Start Game Now!' to proceed.", true);
+                    setMessage("Message complete. Click 'Start Game Now!' to proceed.", true);
                     if (adButtonEl) {
                         adButtonEl.textContent = "Start Game Now!";
                         adButtonEl.disabled = false;
@@ -419,14 +419,14 @@
                 case 'ad_delay':
                     html = `
                         <div class="text-center p-6 border-4 border-yellow-500 rounded-xl bg-gray-800">
-                            <h2 class="text-2xl font-bold mb-4 text-yellow-400">Sponsored Content</h2>
-                            <!-- Updated container to use max-w-sm and a flexible height (min-h-80) for better mobile responsiveness -->
+                            <h2 class="text-2xl font-bold mb-4 text-yellow-400">Sponsor Message</h2>
+                            <!-- Container for the sponsor image (now only shows the image, no fallback text) -->
                             <div class="bg-gray-900 border-2 border-gray-600 mb-6 rounded-lg overflow-hidden flex justify-center items-center w-full max-w-sm mx-auto min-h-80">
-                                <!-- Restoring the specific uploaded image path for internal use -->
+                                <!-- Image source points directly to your uploaded file -->
                                 <img src="https://github.com/hodtest787-ctrl/Mind-/blob/main/images/518273929_1326494459476516_921060520998681378_n.png" 
-                                     alt="Thopla - Connecting Nepali Ad" 
+                                     alt="Sponsor Message Image" 
                                      class="h-full w-full object-contain"
-                                     onerror="this.onerror=null;this.src='https://placehold.co/300x533/1f2937/d1d5db?text=Ad+Not+Available';"
+                                     <!-- Removed onerror handler and fallback URL -->
                                 >
                             </div>
                             <p class="mb-4 text-lg text-red-400 font-semibold">
